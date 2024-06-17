@@ -71,7 +71,7 @@ struct editorConfig E;
 
 void editorSetStatusMessage(const char *fmt, ...);
 void editorRefreshScreen();
-char *editorPrompt(char *prompt);
+char *editorPrompt(char *prompt, void (*callback)(char *, int));
 
 /*** terminal ***/
 
@@ -220,6 +220,20 @@ int editorRowCxToRx(eRow *row, int cx) {
 		rx++; // Move to right of next tab stop.
 	}
 	return rx;
+}
+
+// Converts render index into a character index.
+int editorRowRxToCx(eRow *row, int rx) {
+	int cur_rx = 0;
+	int cx;
+	for (cx = 0; cx < row->size; cx++) { // Loop through chars string.
+		if (row->chars[cx] == '\t') 
+			cur_rx += (BERRYTEXT_FORCE_QUIT	- 1) - (cur_rx % BERRYTEXT_FORCE_QUIT);
+		cur_rx++;
+		
+		if (cur_rx > rx) return cx;
+	}
+	return cx;
 }
 
 // Function to update a row using a temporary render row.
@@ -422,7 +436,7 @@ void editorOpen(char *file_name) {
 // Function to save changes made in editor.
 void editorSave() {
 	if (E.file_name == NULL) { // If no file name, prompt for it.
-		E.file_name = editorPrompt("Save as: %s (ESC to cancel)");
+		E.file_name = editorPrompt("Save as: %s (ESC to cancel)", NULL);
 		if (E.file_name == NULL) {
 			editorSetStatusMessage("Save Aborted");
 			return;
@@ -451,6 +465,64 @@ void editorSave() {
 	}
 	free(buf); // Free memory assigned to buf.
 	editorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
+}
+
+/*** find ***/
+void editorFindCallback(char *query, int key) {
+	static int last_match = -1;
+	static int direction = 1;
+		
+	if (key == '\r' || key == '\x1b') {
+		last_match = -1;
+		direction = 1;
+		return; // Abort search operation
+	} else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
+		direction = 1;
+	} else if (key == ARROW_LEFT || key == ARROW_UP) {
+		direction = -1;
+	} else {
+		last_match = -1;
+		direction = 1;
+	}
+	
+	if (last_match == -1) direction = 1;
+	int current = last_match;
+	int i;
+	for (i = 0; i < E.num_rows; i++) { // Loop through all file rows.
+		current += direction;
+		if (current == -1) current = E.num_rows - 1;
+		else if (current == E.num_rows) current = 0;
+		
+		eRow *row = &E.row[current];
+		// Check if query is a substring of the current row
+		char *match = strstr(row->render, query);
+		if (match) {
+			last_match = current;
+			E.curs_y = current;
+			E.curs_x = editorRowRxToCx(row, match - row->render);
+			E.row_offset = E.num_rows;
+			break;
+		}
+	}	
+}
+
+void editorFind() {
+	int saved_cx = E.curs_x;
+	int saved_cy = E.curs_y;
+	int saved_col_off = E.col_offset;
+	int saved_row_off = E.row_offset;
+	
+	char *query = editorPrompt("Search: %s (use ESC/Arrows/Enter)", 
+		editorFindCallback);
+	
+	if (query) {
+		free(query);
+	} else {
+		E.curs_x = saved_cx;
+		E.curs_y = saved_cy;
+		E.col_offset = saved_col_off;
+		E.row_offset = saved_row_off;
+	}
 }
 
 /*** append buffer ***/
@@ -624,7 +696,7 @@ void editorSetStatusMessage(const char *fmt, ...) {
 /*** input ***/
 
 // Function to prompt the user for input.
-char *editorPrompt(char *prompt) {
+char *editorPrompt(char *prompt, void (*callback)(char *, int)) {
 	size_t buf_size = 128;
 	char *buf = malloc(buf_size); // Dynamically allocated string.
 	
@@ -641,11 +713,13 @@ char *editorPrompt(char *prompt) {
 			if (buf_len != 0) buf[--buf_len] = '\0';
 		} else if (c == '\x1b') { // If user pressed esc key.
 			editorSetStatusMessage("");
+			if (callback) callback(buf, c);
 			free(buf); // Clear message, prompt and free memory.
 			return NULL;
 		} else if (c == '\r') { // If character is enter key.
 			if (buf_len != 0) { // If input is not empty.
 				editorSetStatusMessage("");
+				if (callback) callback(buf, c);
 				return buf; // Clear status meesage and return input.
 			}
 		  // Else if input is printable character.
@@ -657,6 +731,7 @@ char *editorPrompt(char *prompt) {
 			buf[buf_len++] = c;
 			buf[buf_len] = '\0'; // End with \0 to indicate end of string.
 		}
+		if (callback) callback(buf, c);
 	}
 }
 
@@ -745,6 +820,10 @@ void editorProcessKeypress() {
 			if (E.curs_y < E.num_rows)
 				E.curs_x = E.row[E.curs_y].size;
 			break;
+			
+		case CTRL_KEY('f'):
+			editorFind();
+			break;
 		
 		// If char is backspace/ctrl(h) or delete key.
 		case BACKSPACE:
@@ -822,7 +901,8 @@ int main(int argc, char *argv[]) {
 	if (argc >= 2) { // If two or more arguments passed.
 		editorOpen(argv[1]); // Open second arg.
 	}
-	editorSetStatusMessage("HELP: Ctrl-S = Save | Ctrl-Q = Quit");
+	editorSetStatusMessage(
+		"HELP: Ctrl-S = Save | Ctrl-Q = Quit | CTRL-F = Find");
 	
 	while (1) {
 		editorRefreshScreen();
