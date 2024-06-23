@@ -811,7 +811,7 @@ void editorDrawRows(struct aBuf *ab) {
 				char welcome[80];
 				// Interpolate Version No. into welcome message.
 				int welcome_len = snprintf(welcome, sizeof(welcome),
-					"BerryText Editor -- version %s", BERRYTEXT_VERSION);
+					"BerryText Editor -- Version %s", BERRYTEXT_VERSION);
 				if (welcome_len > E.screen_cols) welcome_len = E.screen_cols;
 				
 				// Find screen center.
