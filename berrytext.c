@@ -804,70 +804,72 @@ void editorScroll() {
 
 // Draws each row of the buffer of text being handled.
 void editorDrawRows(struct aBuf *ab) {
-	for (int y = 0; y < E.screen_rows; y++) {
-		int file_row = y + E.row_offset;
-		if (file_row >= E.num_rows) {
-			if (E.num_rows == 0 && y == E.screen_rows / 3) {
-				char welcome[80];
-				// Interpolate Version No. into welcome message.
-				int welcome_len = snprintf(welcome, sizeof(welcome),
-					"BerryText Editor -- Version %s", BERRYTEXT_VERSION);
-				if (welcome_len > E.screen_cols) welcome_len = E.screen_cols;
-				
-				// Find screen center.
-				int padding = (E.screen_cols - welcome_len) / 2;
-				if (padding) {
-					aBufAppend(ab, "~", 1);
-					padding--;
-				}
-				while (padding--) aBufAppend(ab, " ", 1);
-				aBufAppend(ab, welcome, welcome_len);
-			} else {
-				aBufAppend(ab, "~", 1); // Draw tilde for rows
-			}
-		} else {
-			int len = E.row[file_row].r_size - E.col_offset;
-			if (len < 0) len = 0; 
-			// If the len is greater than screen cols, reduce it.
-			if (len > E.screen_cols) len = E.screen_cols;
-			char *c = &E.row[file_row].render[E.col_offset];
-			unsigned char *hlight = &E.row[file_row].hlight[E.col_offset];
-			int current_color = -1;
-			for (int j = 0; j < len; j++) {
-				if (iscntrl(c[j])) {
-					char sym = (c[j] <= 26) ? '@' + c[j] : '?';
-					aBufAppend(ab, "\x1b[7m", 4);
-					aBufAppend(ab, &sym, 1);
-					aBufAppend(ab, "\x1b[m", 3);
-					if (current_color != -1) {
-						char buf[16];
-						int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", current_color);
-						aBufAppend(ab, buf, clen);
-					}
-				} else if (hlight[j] == HL_NORMAL) {
-					if (current_color != -1) {
-						aBufAppend(ab, "\x1b[39m", 5);
-						current_color = -1;
-					}
-					aBufAppend(ab, &c[j], 1);
-				} else {
-					int color = editorSyntaxToColor(hlight[j]);
-					if (color != current_color) {
-						current_color = color;
-						char buf[16];
-						int c_len = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
-						aBufAppend(ab, buf, c_len);
-					}
-					aBufAppend(ab, &c[j], 1);
-				}
-			}
-			aBufAppend(ab, "\x1b[39m", 5);
-		}
-		
-		// Escape sequence, erases part of line to the right of cursor.
-		aBufAppend(ab, "\x1b[K", 3);	
-		aBufAppend(ab, "\r\n", 2); // Draw tilde for last row.
-	}
+    for (int y = 0; y < E.screen_rows; y++) {
+        int file_row = y + E.row_offset;
+
+        // Prepare line number formatting for every line
+        char line_num[16];
+        int num_len = snprintf(line_num, sizeof(line_num), "\x1b[37m%d \x1b[0m", file_row + 1);
+        aBufAppend(ab, line_num, num_len);
+
+        if (file_row < E.num_rows) {
+            // Line contains text
+            int len = E.row[file_row].r_size - E.col_offset;
+            if (len < 0) len = 0;
+            if (len > E.screen_cols) len = E.screen_cols;
+
+            // Append Line content
+            char *c = &E.row[file_row].render[E.col_offset];
+            unsigned char *hlight = &E.row[file_row].hlight[E.col_offset];
+            int current_color = -1;
+            for (int j = 0; j < len; j++) {
+                if (iscntrl(c[j])) {
+                    char sym = (c[j] <= 26) ? '@' + c[j] : '?';
+                    aBufAppend(ab, "\x1b[7m", 4);
+                    aBufAppend(ab, &sym, 1);
+                    aBufAppend(ab, "\x1b[m", 3);
+                    if (current_color != -1) {
+                        char buf[16];
+                        int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", current_color);
+                        aBufAppend(ab, buf, clen);
+                    }
+                } else if (hlight[j] == HL_NORMAL) {
+                    if (current_color != -1) {
+                        aBufAppend(ab, "\x1b[39m", 5);
+                        current_color = -1;
+                    }
+                    aBufAppend(ab, &c[j], 1);
+                } else {
+                    int color = editorSyntaxToColor(hlight[j]);
+                    if (color != current_color) {
+                        current_color = color;
+                        char buf[16];
+                        int c_len = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
+                        aBufAppend(ab, buf, c_len);
+                    }
+                    aBufAppend(ab, &c[j], 1);
+                }
+            }
+            aBufAppend(ab, "\x1b[39m", 5);
+        } else if (E.num_rows == 0 && y == E.screen_rows / 3) {
+            // Display a welcome message if the file is empty
+            char welcome[80];
+            int welcome_len = snprintf(welcome, sizeof(welcome),
+                                       "BerryText Editor -- Version %s", BERRYTEXT_VERSION);
+            if (welcome_len > E.screen_cols) welcome_len = E.screen_cols;
+
+            // Center the welcome message
+            int padding = (E.screen_cols - welcome_len) / 2;
+            while (padding-- > 0) aBufAppend(ab, " ", 1);
+            aBufAppend(ab, welcome, welcome_len);
+        } else {
+            // Draw tilde for empty rows if needed (can be omitted if not desired)
+            aBufAppend(ab, "~", 1);
+        }
+        // Escape sequence to erase part of the line to the right of the cursor
+        aBufAppend(ab, "\x1b[K", 3);
+        aBufAppend(ab, "\r\n", 2);
+    }
 }
 
 // Function to create a status bar for the last rows.

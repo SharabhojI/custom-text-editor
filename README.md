@@ -12,7 +12,7 @@ Intended as a project to gain more experience with C programming concepts and sy
 
 ### Planned Features:
 ---
-- Line Numbering
+- ~~Line Numbering~~ (Implemented)
 - Support for more Filetypes
 - Copy, Paste, Undo, Redo
 - Modal Editing and Vim-like commands
