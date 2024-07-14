@@ -1,9 +1,5 @@
 /*** includes ***/
 
-#define _DEFAULT_SOURCE
-#define _BSD_SOURCE
-#define _GNU_SOURCE
-
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -19,6 +15,9 @@
 
 /*** defines ***/
 
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
+#define _GNU_SOURCE
 #define BERRYTEXT_VERSION "0.0.1"
 #define TAB_STOP 8
 #define BERRYTEXT_FORCE_QUIT 3
@@ -27,7 +26,9 @@
 #define HL_HIGHLIGHT_NUMBERS (1<<0)
 #define HL_HIGHLIGHT_STRINGS (1<<1)
 
-// Enumerate escape keys.
+/*** enumerations ***/
+
+// Enumerate function keys.
 enum editorKey {
 	BACKSPACE = 127, // Assign ASCII value of 127.
 	ARROW_LEFT = 1000, // Assign ASCII value of 1000++ for following.
@@ -55,6 +56,7 @@ enum editorHighlight {
 
 /*** data ***/
 
+// Encapsulates syntax highlighting rules for file_type
 struct editorSyntax {
 	char *file_type;
 	char **file_match;
@@ -68,8 +70,8 @@ struct editorSyntax {
 // Data type for storing a row of text.
 typedef struct eRow {
 	int idx;
-	int size;
-	int r_size;
+	int size; // Stores the raw character length of the row.
+	int r_size; // Stores the character length of the rendered row.
 	char *chars; // Pointer for a line of text.
 	char *render; // Pointer for rendering characters for a row/line.
 	unsigned char *hlight; // Highlight.
@@ -85,11 +87,21 @@ struct editorConfig {
 	int screen_rows; // Number of rows on screen.
 	int screen_cols; // Number of columns on screen.
 	int num_rows;
+
 	int dirty; // Flag to indicate if data has been changed.
 	eRow *row; // Dynamic array (pointer) used to hold a row of chars.
 	char *file_name;
 	char status_msg[80];
 	time_t status_msg_time; // Timer for status message display.
+
+	char *clipboard; // Buffer to hold copied text.
+	int clipboard_len; // Length of the copied text.
+	int mark_row;
+	int mark_col; // Start column of selection.
+	int select_row;
+	int select_col; // End column of text selection.
+	int in_selection; // Flag to indicate a selection.
+
 	struct editorSyntax *syntax;
 	struct termios orig_termios;
 };
@@ -97,8 +109,8 @@ struct editorConfig E;
 
 /*** filetypes ***/
 
-char *C_HL_extensions[] = { ".c", ".h", ".cpp", NULL };
-char *C_HL_keywords[] = {
+char *C_HL_extensions[] = { ".c", ".h", ".cpp", NULL }; // Define extensions for C
+char *C_HL_keywords[] = { // Define keywords for C
 	"switch", "if", "while", "for", "break", "continue", "return", "else",
 	"struct", "union", "typedef", "static", "enum", "class", "case",
 	"int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
@@ -125,22 +137,25 @@ char *editorPrompt(char *prompt, void (*callback)(char *, int));
 
 /*** terminal ***/
 
+// Function to terminate process after clearing screen (prints error message)
 void die(const char *s) {
 	// Escape seq, J -> erase in display, 2 -> entire screen cleared.
 	write(STDOUT_FILENO, "\x1b[2J", 4);
 	// Escape sequence, H -> cursor position (defaults to pos 1;1H)
 	write(STDOUT_FILENO, "\x1b[H", 3);
-	
+
 	perror(s); // Print descriptive error message.
 	exit(1);
 }
 
+// Function to restore terminal settings
 void disableRawMode() {
 	// Revert attribute to saved attribute orig_termios.
 	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1) 
 		die("tcsetattr");
 }
 
+// Function to set terminal into raw mode (inpts are read char by char without buffering / processing special chars)
 void enableRawMode() {
 	// Read terminal STDIN attribute into orig_termios.
 	// Revert terminal attributes when exiting.
@@ -257,6 +272,7 @@ int getWindowSize(int *rows, int *cols) {
 
 /*** syntax hgihlighting ***/
 
+// Determines if a character is a seperator (e.g. whitespace, null char, punctuation / operator)
 int is_seperator(int c) {
 	return isspace(c) || c == '\0' || strchr(",.()+-/*=~%<>[];", c) != NULL;
 }
@@ -374,6 +390,7 @@ void editorUpdateSyntax(eRow *row) {
 		editorUpdateSyntax(&E.row[row->idx + 1]);
 }
 
+// Function to map syntax highlight to its corresponding color
 int editorSyntaxToColor(int hlight) {
 	switch (hlight) {
 		case HL_COMMENT:
@@ -594,6 +611,103 @@ void editorDeleteChar() {
 		editorRowAppendString(&E.row[E.curs_y - 1], row->chars, row->size);
 		editorDeleteRow(E.curs_y); // Delete row y-cursor is on.
 		E.curs_y--;
+	}
+}
+
+// Function to copy a selection of text.
+void editorCopySelection() {
+	if (!E.in_selection) return; // No selection active, so break out.
+
+	// Calculate the size of the selection
+	int start_row = E.mark_row;
+	int end_row = E.select_row;
+	int start_col = E.mark_col;
+	int end_col = E.select_col;
+
+	// Case where selection starts at a row greater than where it ends or alternatively
+	// where selection is on the same row but starts at a greater column than where it ends.
+	if (start_row > end_row || (start_row == end_row && start_col > end_col)) {
+		// Swap start and end positions.
+		int start_row = E.select_row;
+		int end_row = E.mark_row;
+		int start_col = E.select_col;
+		int end_col = E.mark_col;
+
+	}
+
+	free(E.clipboard); // Free existing clipboard content.
+
+	// Calculate the size of the selection
+	E.clipboard_len = 0;
+	for (int i = start_row; i <= end_row; i++) {
+		// If starting row, selection begins at start_col, else selection begins at col 0.
+		int line_start = (i == start_row) ? start_col : 0;
+		// If ending row, selection ends at end_col, else selection ends at last col.
+		int line_end = (i == end_row) ? end_col : E.row[i].r_size - 1;
+		int line_len = line_end - line_start + 1;
+		E.clipboard_len += line_len + 1; // +1 for new line.
+	}
+
+	// Allocate memory for clipboard
+	E.clipboard = malloc(E.clipboard_len);
+	if (E.clipboard == NULL) return; // Break out if memory allocation failed
+
+	// Copy text selection into clipboard
+	char *p = E.clipboard;
+	for (int i = start_row; i <= end_row; i++) {
+		int line_start = (i == start_row) ? start_col : 0;
+		int line_end = (i == end_row) ? end_col : E.row[i].r_size - 1;
+		int line_len = line_end - line_start + 1;
+
+		// Copy the selected portion of the current row into the clipboard
+		memcpy(p, &E.row[i].render[line_start], line_len);  // Copy the characters to the clipboard
+		p += line_len;  // Move the clipboard pointer forward
+		*p = '\n';  // Add a newline character after the copied line
+		p++;  // Move the clipboard pointer past the newline character
+	}
+}
+
+// Paste text from clipboard at the cursor position
+void editorPasteClipboard() {
+	if (E.clipboard == NULL) return; // Break out if nothing to paste
+
+	// Get cursor position
+	int row = E.curs_y + E.row_offset;
+	int col = E.curs_x + E.col_offset;
+
+	// Split the clipboard into lines
+	char *line = strtok(E.clipboard, "\n"); // Tokenize string, delimiting with newline
+	while (line != NULL) {
+		int line_len = strlen(line);
+
+		// Check if column is greater than the size of E.row[row]
+		if (col > E.row[row].size) {
+			E.row[row].chars = realloc(E.row[row].chars, col + line_len); // Reallocate memory
+			if (E.row[row].chars == NULL) return; // Memory allocation failed
+		}
+
+		// Shift existing chars to the right to make space for line
+		memmove(&E.row[row].chars[col + line_len], &E.row[row].chars[col], E.row[row].size - col);
+		memcpy(&E.row[row].chars[col], line, line_len); // Copy chars from line into row at col
+		E.row[row].size += line_len; // update row size
+		col += line_len; // Advance col position for next insertion
+
+		// Advance to next token, will break out of loop if no more tokens/lines
+		line = strtok(NULL, "\n");
+		if (line != NULL) {
+			// Increment row and start at first col
+			row++;
+			col = 0;
+			if (row >= E.num_rows) {
+				// Add new row and reallocate necessary memory
+				E.num_rows++;
+				E.row = realloc(E.row, sizeof(erow) * E.num_rows);
+				if (E.row == NULL) return; // Break out if allocation failed
+				// Initialize new row
+				E.row[row].size = 0;
+				E.row[row].chars = NULL;
+			}
+		}
 	}
 }
 
@@ -1080,7 +1194,19 @@ void editorProcessKeypress() {
 			if (E.curs_y < E.num_rows)
 				E.curs_x = E.row[E.curs_y].size;
 			break;
-			
+
+		// If combination is ctrl + c, then copy text selection.
+		case CTRL_KEY('c'):
+			editorCopySelection();
+			break;
+
+		// If combination is ctrl + v, then paste clipboard.
+		case CTRL_KEY('v'):
+			editorPasteClipboard();
+			break;
+		}
+
+		// If combination is ctrl + f, initiate find function.
 		case CTRL_KEY('f'):
 			editorFind();
 			break;
