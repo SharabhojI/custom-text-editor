@@ -6,7 +6,7 @@ Intended as a project to gain more experience with the C programming language.
 ## Current Features:
 
 - Text Viewing/Editing
-- Command Shortcuts (Save, Search, Quit)
+- Command Shortcuts (Save, Search, Quit, Arrow Keys)
 - File Search
 - Syntax Highlighting (C/C++)
 
@@ -14,9 +14,9 @@ Intended as a project to gain more experience with the C programming language.
 
 - ~~Line Numbering~~ (Implemented)
 - ~~Text and Line Selection~~ (Implemented)
-- Support for more Filetypes
-- Copy, Paste, Undo, Redo (In Progress)
+- ~~Copy~~, ~~Paste~~, Undo, Redo (In Progress)
 - Modal Editing and Vim-like Commands
+- Support for more Filetypes
 
 ## Required Utilites
 

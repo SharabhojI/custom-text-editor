@@ -141,14 +141,32 @@ char *editorPrompt(char *prompt, void (*callback)(char *, int));
 
 /*** terminal ***/
 
+void editorCleanup() {
+    // Free the clipboard
+    free(E.clipboard);
+
+    // Free each row
+    for (int i = 0; i < E.num_rows; i++) {
+        free(E.row[i].chars);
+        free(E.row[i].render);
+        free(E.row[i].hlight);
+    }
+
+    // Free the row array itself
+    free(E.row);
+
+    // Free the filename
+    free(E.file_name);
+}
+
 // Function to terminate process after clearing screen (prints error message)
 void die(const char *s) {
 	// Escape seq, J -> erase in display, 2 -> entire screen cleared.
 	write(STDOUT_FILENO, "\x1b[2J", 4);
 	// Escape sequence, H -> cursor position (defaults to pos 1;1H)
 	write(STDOUT_FILENO, "\x1b[H", 3);
-
 	perror(s); // Print descriptive error message.
+	editorCleanup();
 	exit(1);
 }
 
@@ -667,7 +685,6 @@ void editorDeleteChar() {
 	}
 }
 
-
 void editorCopySelection() {
     if (!E.in_selection) return;
 
@@ -675,6 +692,13 @@ void editorCopySelection() {
     int end_row = E.mark_row > E.select_row ? E.mark_row : E.select_row;
     int start_col = E.mark_row < E.select_row ? E.mark_col : E.select_col;
     int end_col = E.mark_row > E.select_row ? E.mark_col : E.select_col;
+
+    // Swap start and end columns if they're in the wrong order
+    if (start_row == end_row && start_col > end_col) {
+        int temp = start_col;
+        start_col = end_col;
+        end_col = temp;
+    }
 
     free(E.clipboard);
     E.clipboard = NULL;
@@ -685,7 +709,15 @@ void editorCopySelection() {
         int row_end = (row == end_row) ? end_col : E.row[row].size;
         int len = row_end - row_start;
 
-        E.clipboard = realloc(E.clipboard, E.clipboard_len + len + 1);
+        if (len < 0) len = 0;  // Ensure we don't have negative length
+
+        E.clipboard = realloc(E.clipboard, E.clipboard_len + len + 2);  // +2 for newline and null terminator
+        if (E.clipboard == NULL) {
+            // Handle memory allocation failure
+            E.clipboard_len = 0;
+            return;
+        }
+
         memcpy(E.clipboard + E.clipboard_len, &E.row[row].chars[row_start], len);
         E.clipboard_len += len;
 
@@ -700,20 +732,17 @@ void editorCopySelection() {
 
 // Paste text from clipboard at the cursor position
 void editorPasteClipboard() {
-    if (E.clipboard == NULL) return;
+    if (E.clipboard == NULL || E.clipboard_len == 0) return;
 
     if (E.in_selection) {
         editorDeleteSelection();
     }
 
-    char *line = strtok(E.clipboard, "\n");
-    while (line != NULL) {
-        for (int i = 0; line[i] != '\0'; i++) {
-            editorInsertChar(line[i]);
-        }
-        line = strtok(NULL, "\n");
-        if (line != NULL) {
+    for (int i = 0; i < E.clipboard_len; i++) {
+        if (E.clipboard[i] == '\n') {
             editorInsertNewline();
+        } else {
+            editorInsertChar(E.clipboard[i]);
         }
     }
 }
@@ -1244,6 +1273,7 @@ void editorProcessKeypress() {
 			write(STDOUT_FILENO, "\x1b[2J", 4);
 			// Escape sequence, H -> cursor position (defaults to 1;1H).
 			write(STDOUT_FILENO, "\x1b[H", 3);
+			editorCleanup();
 			exit(0);
 			break;
 
@@ -1395,6 +1425,8 @@ void initEditor() {
 	E.status_msg[0] = '\0'; // Init with null termination.
 	E.status_msg_time = 0; // Timestamp for status message.
 	E.syntax = NULL;
+	E.clipboard = NULL;
+	E.clipboard_len = 0;
 	
 	// If invalid window size, end process
 	if (getWindowSize(&E.screen_rows, &E.screen_cols) == -1)
@@ -1405,6 +1437,7 @@ void initEditor() {
 int main(int argc, char *argv[]) {
 	enableRawMode();
 	initEditor();
+	atexit(editorCleanup);
 	if (argc >= 2) { // If two or more arguments passed.
 		editorOpen(argv[1]); // Open second arg.
 	}
