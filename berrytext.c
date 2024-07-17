@@ -39,7 +39,11 @@ enum editorKey {
 	HOME_KEY,
 	END_KEY,
 	PAGE_UP,
-	PAGE_DOWN
+	PAGE_DOWN,
+	CTRL_ARROW_UP,
+	CTRL_ARROW_DOWN,
+	CTRL_ARROW_LEFT,
+	CTRL_ARROW_RIGHT
 };
 
 // Enumeration for the syntax highlight.
@@ -194,14 +198,14 @@ int editorReadKey() {
 	}
 	
 	if(c == '\x1b') { // Check if escape character.
-		char seq[3];
+		char seq[5];
 		if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
 		if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
 		
 		if (seq[0] == '[') { // Check for command modifier.
 			if (seq[1] >= '0' && seq[1] <= '9') {
 				if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
-				if (seq[2] == '~') { // If final char is ~.
+				if (seq[2] == '~') { // If third char is ~.
 					switch (seq[1]) {
 						case '1': return HOME_KEY;
 						case '3': return DEL_KEY;
@@ -210,6 +214,17 @@ int editorReadKey() {
 						case '6': return PAGE_DOWN;
 						case '7': return HOME_KEY;
 						case '8': return END_KEY;
+					}
+				} else if (seq[2] == ';') { // If third char is ;.
+					if (read(STDIN_FILENO, &seq[3], 1) != 1) return '\x1b';
+					if (read(STDIN_FILENO, &seq[4], 1) != 1) return '\x1b';
+					if (seq[3] == '5') { // Check if fourth character is Ctrl key
+						switch(seq[4]) {
+							case 'A': return CTRL_ARROW_UP;
+							case 'B': return CTRL_ARROW_DOWN;
+							case 'C': return CTRL_ARROW_RIGHT;
+							case 'D': return CTRL_ARROW_LEFT;
+						}
 					}
 				}
 			} else {
@@ -565,8 +580,42 @@ void editorRowDeleteChar(eRow *row, int at) {
 
 /*** editor operations ***/
 
+void editorDeleteSelection() {
+    if (!E.in_selection) return;
+
+    int start_row = E.mark_row < E.select_row ? E.mark_row : E.select_row;
+    int end_row = E.mark_row > E.select_row ? E.mark_row : E.select_row;
+    int start_col = E.mark_row < E.select_row ? E.mark_col : E.select_col;
+    int end_col = E.mark_row > E.select_row ? E.mark_col : E.select_col;
+
+    for (int row = start_row; row <= end_row; row++) {
+        int row_start = (row == start_row) ? start_col : 0;
+        int row_end = (row == end_row) ? end_col : E.row[row].size;
+        int delete_len = row_end - row_start;
+
+        memmove(&E.row[row].chars[row_start], &E.row[row].chars[row_end], E.row[row].size - row_end);
+        E.row[row].size -= delete_len;
+        E.row[row].chars[E.row[row].size] = '\0';
+        editorUpdateRow(&E.row[row]);
+    }
+
+    if (start_row != end_row) {
+        for (int row = start_row + 1; row <= end_row; row++) {
+            editorDeleteRow(start_row + 1);
+        }
+    }
+
+    E.curs_y = start_row;
+    E.curs_x = start_col;
+    E.in_selection = 0;
+    E.dirty++;
+}
+
 // Function to insert a character.
 void editorInsertChar(int c) {
+    if (E.in_selection) {
+        editorDeleteSelection();
+    }
 	if (E.curs_y == E.num_rows) { // If on the last row.
 		editorInsertRow(E.num_rows, "", 0); // Insert new row.
 	}
@@ -595,6 +644,10 @@ void editorInsertNewline() {
 
 // Function to delete a character.
 void editorDeleteChar() {
+	if (E.in_selection) {
+        editorDeleteSelection();
+        return;
+    }
 	// If cursor is past end of the file, return immediately.
 	// If the cursor position is at the start of the file, return.
 	if (E.curs_y == E.num_rows) return; 
@@ -614,100 +667,65 @@ void editorDeleteChar() {
 	}
 }
 
-void editorCopySelection() {
-    if (!E.in_selection) return; // No selection active
 
-    // Calculate the size of the selection
+void editorCopySelection() {
+    if (!E.in_selection) return;
+
     int start_row = E.mark_row < E.select_row ? E.mark_row : E.select_row;
     int end_row = E.mark_row > E.select_row ? E.mark_row : E.select_row;
-    int start_col = (E.mark_row < E.select_row || (E.mark_row == E.select_row && E.mark_col < E.select_col)) ? E.mark_col : E.select_col;
-    int end_col = (E.mark_row > E.select_row || (E.mark_row == E.select_row && E.mark_col > E.select_col)) ? E.mark_col : E.select_col;
+    int start_col = E.mark_row < E.select_row ? E.mark_col : E.select_col;
+    int end_col = E.mark_row > E.select_row ? E.mark_col : E.select_col;
 
-    // Free any existing clipboard content
     free(E.clipboard);
+    E.clipboard = NULL;
+    E.clipboard_len = 0;
 
-    // Calculate the size of the clipboard content
-    int clipboard_size = 0;
-    for (int i = start_row; i <= end_row; i++) {
-        if (i == start_row && i == end_row) {
-            clipboard_size += end_col - start_col + 1;
-        } else if (i == start_row) {
-            clipboard_size += E.row[i].size - start_col + 1;
-        } else if (i == end_row) {
-            clipboard_size += end_col + 1;
-        } else {
-            clipboard_size += E.row[i].size + 1;
+    for (int row = start_row; row <= end_row; row++) {
+        int row_start = (row == start_row) ? start_col : 0;
+        int row_end = (row == end_row) ? end_col : E.row[row].size;
+        int len = row_end - row_start;
+
+        E.clipboard = realloc(E.clipboard, E.clipboard_len + len + 1);
+        memcpy(E.clipboard + E.clipboard_len, &E.row[row].chars[row_start], len);
+        E.clipboard_len += len;
+
+        if (row != end_row) {
+            E.clipboard[E.clipboard_len] = '\n';
+            E.clipboard_len++;
         }
     }
 
-    // Allocate memory for clipboard
-    E.clipboard = malloc(clipboard_size + 1);
-    char *p = E.clipboard;
-
-    // Copy the selection to the clipboard
-    for (int i = start_row; i <= end_row; i++) {
-        if (i == start_row && i == end_row) {
-            memcpy(p, &E.row[i].chars[start_col], end_col - start_col + 1);
-            p += end_col - start_col + 1;
-        } else if (i == start_row) {
-            memcpy(p, &E.row[i].chars[start_col], E.row[i].size - start_col);
-            p += E.row[i].size - start_col;
-            *p++ = '\n';
-        } else if (i == end_row) {
-            memcpy(p, E.row[i].chars, end_col);
-            p += end_col;
-        } else {
-            memcpy(p, E.row[i].chars, E.row[i].size);
-            p += E.row[i].size;
-            *p++ = '\n';
-        }
-    }
-    *p = '\0'; // Null terminate the clipboard content
+    E.clipboard[E.clipboard_len] = '\0';
 }
-
 
 // Paste text from clipboard at the cursor position
 void editorPasteClipboard() {
-    if (E.clipboard == NULL) return; // Break out if nothing to paste
+    if (E.clipboard == NULL) return;
 
-    // Get cursor position
-    int row = E.curs_y + E.row_offset;
-    int col = E.curs_x + E.col_offset;
+    if (E.in_selection) {
+        editorDeleteSelection();
+    }
 
-    // Split the clipboard into lines
-    char *line = strtok(E.clipboard, "\n"); // Tokenize string, delimiting with newline
+    char *line = strtok(E.clipboard, "\n");
     while (line != NULL) {
-        int line_len = strlen(line);
-
-        // Check if column is greater than the size of E.row[row]
-        if (col > E.row[row].size) {
-            E.row[row].chars = realloc(E.row[row].chars, col + line_len); // Reallocate memory
-            if (E.row[row].chars == NULL) return; // Memory allocation failed
+        for (int i = 0; line[i] != '\0'; i++) {
+            editorInsertChar(line[i]);
         }
-
-        // Shift existing chars to the right to make space for line
-        memmove(&E.row[row].chars[col + line_len], &E.row[row].chars[col], E.row[row].size - col);
-        memcpy(&E.row[row].chars[col], line, line_len); // Copy chars from line into row at col
-        E.row[row].size += line_len; // Update row size
-        col += line_len; // Advance col position for next insertion
-
-        // Advance to next token, will break out of loop if no more tokens/lines
         line = strtok(NULL, "\n");
         if (line != NULL) {
-            // Increment row and start at first col
-            row++;
-            col = 0;
-            if (row >= E.num_rows) {
-                // Add new row and reallocate necessary memory
-                E.num_rows++;
-                E.row = realloc(E.row, sizeof(eRow) * E.num_rows);
-                if (E.row == NULL) return; // Break out if allocation failed
-                // Initialize new row
-                E.row[row].size = 0;
-                E.row[row].chars = NULL;
-            }
+            editorInsertNewline();
         }
     }
+}
+
+int editorLineNumberWidth() {
+    int max_rows = E.num_rows > 0 ? E.num_rows : 1;
+    int digits = 1;
+    while (max_rows >= 10) {
+        digits++;
+        max_rows /= 10;
+    }
+    return digits + 1; // +1 for the space after the number
 }
 
 /*** file I/O ***/
@@ -917,21 +935,29 @@ void editorScroll() {
 
 // Draws each row of the buffer of text being handled.
 void editorDrawRows(struct aBuf *ab) {
+    int line_number_width = editorLineNumberWidth();
     for (int y = 0; y < E.screen_rows; y++) {
         int file_row = y + E.row_offset;
 
-        // Prepare line number formatting for every line
-        char line_num[16];
-        int num_len = snprintf(line_num, sizeof(line_num), "\x1b[37m%d \x1b[0m", file_row + 1);
-        aBufAppend(ab, line_num, num_len);
-
+        // Line number section with different background color
+        aBufAppend(ab, "\x1b[44m", 5); // Blue background
         if (file_row < E.num_rows) {
-            // Line contains text
+            char line_num[16];
+            int num_len = snprintf(line_num, sizeof(line_num), "%*d ", line_number_width - 1, file_row + 1);
+            aBufAppend(ab, line_num, num_len);
+        } else {
+            // For empty lines, just add spaces
+            for (int i = 0; i < line_number_width; i++) {
+                aBufAppend(ab, " ", 1);
+            }
+        }
+        aBufAppend(ab, "\x1b[m", 3); // Reset formatting
+
+        // Text content
+        if (file_row < E.num_rows) {
             int len = E.row[file_row].r_size - E.col_offset;
             if (len < 0) len = 0;
-            if (len > E.screen_cols) len = E.screen_cols;
-
-            // Append Line content
+            if (len > E.screen_cols - line_number_width) len = E.screen_cols - line_number_width;
             char *c = &E.row[file_row].render[E.col_offset];
             unsigned char *hlight = &E.row[file_row].hlight[E.col_offset];
             int current_color = -1;
@@ -944,15 +970,10 @@ void editorDrawRows(struct aBuf *ab) {
                     int sel_start_col = (E.mark_row == sel_start_row) ? E.mark_col : E.select_col;
                     int sel_end_col = (E.mark_row == sel_end_row) ? E.mark_col : E.select_col;
 
-                    if (file_row > sel_start_row && file_row < sel_end_row) {
-                        selected = 1;
-                    } else if (file_row == sel_start_row && file_row == sel_end_row) {
-                        if (j >= sel_start_col && j <= sel_end_col) {
-                            selected = 1;
-                        }
-                    } else if (file_row == sel_start_row && j >= sel_start_col) {
-                        selected = 1;
-                    } else if (file_row == sel_end_row && j <= sel_end_col) {
+                    if ((file_row > sel_start_row && file_row < sel_end_row) ||
+                        (file_row == sel_start_row && file_row == sel_end_row && j + E.col_offset >= sel_start_col && j + E.col_offset < sel_end_col) ||
+                        (file_row == sel_start_row && file_row != sel_end_row && j + E.col_offset >= sel_start_col) ||
+                        (file_row == sel_end_row && file_row != sel_start_row && j + E.col_offset < sel_end_col)) {
                         selected = 1;
                     }
                 }
@@ -994,21 +1015,21 @@ void editorDrawRows(struct aBuf *ab) {
             }
             aBufAppend(ab, "\x1b[39m", 5);
         } else if (E.num_rows == 0 && y == E.screen_rows / 3) {
-            // Display a welcome message if the file is empty
             char welcome[80];
             int welcome_len = snprintf(welcome, sizeof(welcome),
                                        "BerryText Editor -- Version %s", BERRYTEXT_VERSION);
             if (welcome_len > E.screen_cols) welcome_len = E.screen_cols;
-
-            // Center the welcome message
             int padding = (E.screen_cols - welcome_len) / 2;
-            while (padding-- > 0) aBufAppend(ab, " ", 1);
+            if (padding) {
+                aBufAppend(ab, "~", 1);
+                padding--;
+            }
+            while (padding--) aBufAppend(ab, " ", 1);
             aBufAppend(ab, welcome, welcome_len);
         } else {
-            // Draw tilde for empty rows if needed (can be omitted if not desired)
             aBufAppend(ab, "~", 1);
         }
-        // Escape sequence to erase part of the line to the right of the cursor
+
         aBufAppend(ab, "\x1b[K", 3);
         aBufAppend(ab, "\r\n", 2);
     }
@@ -1072,9 +1093,10 @@ void editorRefreshScreen() {
 	editorDrawStatusBar(&ab);
 	editorDrawMessageBar(&ab);
 	
-	char buf[32];	
-	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.curs_y - E.row_offset) + 1, 
-											  (E.rend_x - E.col_offset) + 1);
+	char buf[32];
+    int line_number_width = editorLineNumberWidth();
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.curs_y - E.row_offset) + 1,
+             (E.rend_x - E.col_offset) + 1 + line_number_width);
 	aBufAppend(&ab, buf, strlen(buf));
 	aBufAppend(&ab, "\x1b[?25h", 6); // Escape seq to show cursor.	
 	write(STDOUT_FILENO, ab.b, ab.len); // Write buffer to STDOUT.
@@ -1139,65 +1161,62 @@ char *editorPrompt(char *prompt, void (*callback)(char *, int)) {
 
 // Function to move cursor based on input keypress.
 void editorMoveCursor(int key, int ctrl) {
-	// If the cursor y is greater than num rows, row is null, else
-	// the row is at cursor y.
-	eRow *row = (E.curs_y >= E.num_rows) ? NULL : &E.row[E.curs_y];
+    int line_number_width = editorLineNumberWidth();
+    eRow *row = (E.curs_y >= E.num_rows) ? NULL : &E.row[E.curs_y];
 
-	if (ctrl) {
-		if (!E.in_selection) {
-			E.mark_row = E.curs_y;
-			E.mark_col = E.curs_x;
-			E.in_selection = 1;
-		}
-		E.select_row = E.curs_y;
-		E.select_col = E.curs_x;
-	} else if (E.in_selection) {
-		E.in_selection = 0;
-	}
+    if (ctrl && !E.in_selection) {
+        E.mark_row = E.curs_y;
+        E.mark_col = E.curs_x - line_number_width;
+        E.in_selection = 1;
+    } else if (!ctrl && E.in_selection) {
+        E.in_selection = 0;
+    }
 
-	// Switch based upon input key, move along relevant axis.
-	switch (key) {
-		case ARROW_LEFT:
-			if (E.curs_x != 0) { // If cursor not on first col.
-				E.curs_x--;
-			} else if (E.curs_y > 0) {
-				E.curs_y--;
-				E.curs_x = E.row[E.curs_y].size;
-			}
-			break;
-		case ARROW_RIGHT:
-			// If row and cursor x are less than (*row).size.
-			if (row && E.curs_x < row->size) {
-				E.curs_x++;
-			// Else if they are equal to (*row).size.
-			} else if (row && E.curs_x == row->size) {
-				E.curs_y++;
-				E.curs_x = 0;
-			}
-			break;
-		case ARROW_UP:
-			if (E.curs_y != 0) { // If cursor not on first row.
-				E.curs_y--;
-			}
-			break;
-		case ARROW_DOWN:
-			if (E.curs_y < E.num_rows) { // If not on last row.
-				E.curs_y++;
-			}
-			break;
-	}
+    switch (key) {
+        case ARROW_LEFT:
+        case CTRL_ARROW_LEFT:
+            if (E.curs_x > line_number_width) {
+                E.curs_x--;
+            } else if (E.curs_y > 0) {
+                E.curs_y--;
+                E.curs_x = E.row[E.curs_y].size + line_number_width;
+            }
+            break;
+        case ARROW_RIGHT:
+        case CTRL_ARROW_RIGHT:
+            if (row && E.curs_x < row->size + line_number_width) {
+                E.curs_x++;
+            } else if (E.curs_y < E.num_rows - 1) {
+                E.curs_y++;
+                E.curs_x = line_number_width;
+            }
+            break;
+        case ARROW_UP:
+        case CTRL_ARROW_UP:
+            if (E.curs_y > 0) {
+                E.curs_y--;
+            }
+            break;
+        case ARROW_DOWN:
+        case CTRL_ARROW_DOWN:
+            if (E.curs_y < E.num_rows - 1) {
+                E.curs_y++;
+            }
+            break;
+    }
 
-	// Block to snap cursor to end of a line.
-	row = (E.curs_y >= E.num_rows) ? NULL : &E.row[E.curs_y];
-	int row_len = row ? row->size : 0; // If row, row_len = row, else 0.
-	if (E.curs_x > row_len) {
-		E.curs_x = row_len;
-	}
+    row = (E.curs_y >= E.num_rows) ? NULL : &E.row[E.curs_y];
+    int row_len = row ? row->size + line_number_width : line_number_width;
+    if (E.curs_x > row_len) {
+        E.curs_x = row_len;
+    }
 
-	if (ctrl) {
-		E.select_row = E.curs_y;
-		E.select_col = E.curs_x;
-	}
+    if (ctrl) {
+        E.select_row = E.curs_y;
+        E.select_col = E.curs_x - line_number_width;
+    }
+
+    editorRefreshScreen();  // Refresh the screen after each cursor movement
 }
 
 // Function for the editor to process a read keypress.
@@ -1258,8 +1277,9 @@ void editorProcessKeypress() {
 			E.mark_row = 0;
 			E.mark_col = 0; // Set mark to first row and column
 			E.select_row = E.num_rows - 1;
-			E.select_col = E.row[E.num_rows - 1].size - 1; // Set select to last row and column
+			E.select_col = E.row[E.num_rows - 1].size; // Set select to last row and column
 			E.in_selection = 1;
+			editorRefreshScreen();
 			break;
 
 		// If combination is ctrl + f, initiate find function.
@@ -1293,6 +1313,13 @@ void editorProcessKeypress() {
 			}
 			break;
 
+		case CTRL_ARROW_UP:
+		case CTRL_ARROW_DOWN:
+		case CTRL_ARROW_LEFT:
+		case CTRL_ARROW_RIGHT:
+			editorMoveCursor(c, 1);  // Pass 1 for ctrl flag
+			break;
+
 		// If keypress is any of the arrow keys.
 		case ARROW_UP:
 		case ARROW_DOWN:
@@ -1301,34 +1328,44 @@ void editorProcessKeypress() {
 			editorMoveCursor(c, 0); // Pass keypress to editorMoveCursor.
 			break;
 
-		// If char is ctrl(l) or esc, do nothing.
+		// If char is ctrl(l), ctrl(w) or ctrl(d) do nothing.
 		case CTRL_KEY('l'):
+		case CTRL_KEY('w'):
+		case CTRL_KEY('d'):
 			break;
 
-		// Handle Escape sequence for Ctrl + Arrow keys
 		case '\x1b': // Escape sequence
-			c = editorReadKey();
-			if (c == '[') {
-				c = editorReadKey();
-				if (c == '1') { // Ctrl + Arrow Keys
-					editorReadKey(); // Skip ';'
-					editorReadKey(); // Skip '5'
-					c = editorReadKey();
-					ctrl = 1;
-				}
-				switch (c) {
-					case 'A':
-						editorMoveCursor(ARROW_UP, ctrl);
-						break;
-					case 'B':
-						editorMoveCursor(ARROW_DOWN, ctrl);
-						break;
-					case 'C':
-						editorMoveCursor(ARROW_RIGHT, ctrl);
-						break;
-					case 'D':
-						editorMoveCursor(ARROW_LEFT, ctrl);
-						break;
+			{
+				char seq[5];
+				if (read(STDIN_FILENO, &seq[0], 1) != 1) return;
+				if (read(STDIN_FILENO, &seq[1], 1) != 1) return;
+
+				if (seq[0] == '[') {
+					if (seq[1] >= '0' && seq[1] <= '9') {
+						if (read(STDIN_FILENO, &seq[2], 1) != 1) return;
+						if (seq[2] == '~') {
+							// Handle other special keys
+						} else if (seq[2] == ';') {
+							if (read(STDIN_FILENO, &seq[3], 1) != 1) return;
+							if (read(STDIN_FILENO, &seq[4], 1) != 1) return;
+							if (seq[3] == '5') { // This indicates Ctrl key
+								ctrl = 1;
+								switch (seq[4]) {
+									case 'A': editorMoveCursor(ARROW_UP, ctrl); break;
+									case 'B': editorMoveCursor(ARROW_DOWN, ctrl); break;
+									case 'C': editorMoveCursor(ARROW_RIGHT, ctrl); break;
+									case 'D': editorMoveCursor(ARROW_LEFT, ctrl); break;
+								}
+							}
+						}
+					} else {
+						switch (seq[1]) {
+							case 'A': editorMoveCursor(ARROW_UP, 0); break;
+							case 'B': editorMoveCursor(ARROW_DOWN, 0); break;
+							case 'C': editorMoveCursor(ARROW_RIGHT, 0); break;
+							case 'D': editorMoveCursor(ARROW_LEFT, 0); break;
+						}
+					}
 				}
 			}
 			break;
