@@ -21,6 +21,7 @@
 #define BERRYTEXT_VERSION "0.0.1"
 #define TAB_STOP 8
 #define BERRYTEXT_FORCE_QUIT 3
+#define MAX_CHANGES 1000
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define ABUF_INIT {NULL, 0} // Empty buffer -> constructor.
 #define HL_HIGHLIGHT_NUMBERS (1<<0)
@@ -58,6 +59,13 @@ enum editorHighlight {
 	HL_MATCH
 };
 
+// Enumerations for the change struct.
+enum ChangeType {
+	INSERT,
+	DELETE,
+	NEWLINE
+};
+
 /*** data ***/
 
 // Encapsulates syntax highlighting rules for file_type
@@ -92,6 +100,7 @@ struct editorConfig {
 	int screen_cols; // Number of columns on screen.
 	int num_rows;
 
+	int cleanup_performed; // Flag to indicate if cleanup (free()) has already been performed.
 	int dirty; // Flag to indicate if data has been changed.
 	eRow *row; // Dynamic array (pointer) used to hold a row of chars.
 	char *file_name;
@@ -110,6 +119,26 @@ struct editorConfig {
 	struct termios orig_termios;
 };
 struct editorConfig E;
+
+// Struct for storing changes in the file
+typedef struct {
+	enum ChangeType type; // the type of change made (e.g. deletion, insertion, newline, etc.)
+	int row; // Row where change occured
+	int col; // col where change occured
+	char *content; // pointer to hold content that was inserted/deleted
+	int content_len; // Length of the content
+} Change;
+
+// stack structure to hold file changes
+typedef struct {
+	Change changes[MAX_CHANGES]; // array for storing change structs
+	int count; // number of changes in the stack
+	int current; // position in stack
+} ChangeStack;
+
+// Global variables for undo and redo stacks
+ChangeStack undo_stack;
+ChangeStack redo_stack;
 
 /*** filetypes ***/
 
@@ -142,6 +171,9 @@ char *editorPrompt(char *prompt, void (*callback)(char *, int));
 /*** terminal ***/
 
 void editorCleanup() {
+    if (E.cleanup_performed) return;
+    E.cleanup_performed = 1;
+
     // Free the clipboard
     free(E.clipboard);
 
@@ -461,6 +493,33 @@ void editorSelectSyntaxHighlight() {
 	}
 }
 
+/*** stack operations ***/
+
+// Function to initialize a ChangeStack
+void initChangeStack(ChangeStack *stack) {
+	stack->count = 0;
+	stack->current = -1; // Current = -1 for empty stack
+}
+
+void pushChange(ChangeStack *stack, Change change) {
+	if (stack->count > MAX_CHANGES) { // if max number of changes has been reached
+		// remove the oldest change
+		memmove(&stack->changes[0], &stack->changes[1], sizeof(Change) * (MAX_CHANGES - 1));
+		stack->count--;
+	}
+	stack->changes[stack->count++] = change; // add change as last element
+	stack->current = stack->count - 1; // update count
+}
+
+// Function to retrieve and remove (pop) the top of the stack (last element to be added)
+Change popChange(ChangeStack *stack) {
+	if (stack->current >= 0) { // if there are changes available in the stack
+		return stack->changes[stack->current--]; // return change and decrement current
+	}
+	Change empty = {0, 0, 0, NULL, 0};
+	return empty; // else return an empty change
+}
+
 /*** row operations ***/
 
 // Convert char index in row to render index.
@@ -598,9 +657,18 @@ void editorRowDeleteChar(eRow *row, int at) {
 
 /*** editor operations ***/
 
-void editorDeleteSelection() {
-    if (!E.in_selection) return;
+// Function to store/record changes made to file
+void editorRecordChange(enum ChangeType type, int row, int col, char *content, int content_len) {
+	Change change = {type, row, col, strdup(content), content_len}; // create change instance
+	pushChange(&undo_stack, change); // push change to the undo stack
+	initChangeStack(&redo_stack); // clear redo stack whenever change is made
+}
 
+// Function to delete a selection of text
+void editorDeleteSelection() {
+    if (!E.in_selection) return; // break out if not in selection mode
+
+	// get the start and end positions for the text selection
     int start_row = E.mark_row < E.select_row ? E.mark_row : E.select_row;
     int end_row = E.mark_row > E.select_row ? E.mark_row : E.select_row;
     int start_col = E.mark_row < E.select_row ? E.mark_col : E.select_col;
@@ -623,10 +691,11 @@ void editorDeleteSelection() {
         }
     }
 
+	// reset cursor position to starting row, col
     E.curs_y = start_row;
     E.curs_x = start_col;
     E.in_selection = 0;
-    E.dirty++;
+    E.dirty++; // indicate change to be saved
 }
 
 // Function to insert a character.
@@ -640,6 +709,8 @@ void editorInsertChar(int c) {
 	// Place character at row pos y, and col pos x.
 	editorRowInsertChar(&E.row[E.curs_y], E.curs_x, c);
 	E.curs_x++;
+	char content[2] = {c, '\0'}; // init content with the char and null character
+	editorRecordChange(INSERT, E.curs_y, E.curs_x - 1, content, 1); // record content change
 }
 
 // Function to insert a new line.
@@ -663,28 +734,36 @@ void editorInsertNewline() {
 // Function to delete a character.
 void editorDeleteChar() {
 	if (E.in_selection) {
-        editorDeleteSelection();
-        return;
-    }
+		editorDeleteSelection();
+		return;
+	}
 	// If cursor is past end of the file, return immediately.
 	// If the cursor position is at the start of the file, return.
 	if (E.curs_y == E.num_rows) return; 
 	if (E.curs_x == 0 && E.curs_y == 0) return;
-	
+
 	eRow *row = &E.row[E.curs_y]; // Get eRow cursor is on.
 	if (E.curs_x > 0) { // If there is a char to left of cursor...
+		char deleted = row->chars[E.curs_x - 1]; // copy char to be deleted
 		editorRowDeleteChar(row, E.curs_x - 1); // Delete the char.
 		E.curs_x--; // Move cursor to the left.
+		char content[2] = {deleted, '\0'}; // init content with deleted char and null char
+		editorRecordChange(DELETE, E.curs_y, E.curs_x, content, 1);
 	} else {
 		// Set cursor to end of previous line.
 		E.curs_x = E.row[E.curs_y - 1].size;
+		char *content = strdup(row->chars);
+		int content_len = row->size;
 		// Append *row.chars to the previous row.
 		editorRowAppendString(&E.row[E.curs_y - 1], row->chars, row->size);
 		editorDeleteRow(E.curs_y); // Delete row y-cursor is on.
 		E.curs_y--;
+		editorRecordChange(DELETE, E.curs_y, E.curs_x, content, content_len);
+		free(content);
 	}
 }
 
+// Function to copy a selection of text
 void editorCopySelection() {
     if (!E.in_selection) return;
 
@@ -700,6 +779,7 @@ void editorCopySelection() {
         end_col = temp;
     }
 
+	// Reset clipboard status
     free(E.clipboard);
     E.clipboard = NULL;
     E.clipboard_len = 0;
@@ -747,6 +827,60 @@ void editorPasteClipboard() {
     }
 }
 
+// Function for editor to undo recently made changes
+void editorUndo() {
+	Change change = popChange(&undo_stack); // get most recent change
+	if (change.type == 0) return; // if no changes, break out
+
+	switch (change.type) {
+		case INSERT: // if most recent change was insertion
+		case NEWLINE:
+			E.curs_y = change.row;
+			E.curs_x = change.col;
+			editorDeleteChar(); // delete inserted character
+			break;
+		case DELETE: // if most recent change was deletion
+			E.curs_y = change.row;
+			E.curs_x = change.col;
+			for (int i = 0; i < change.content_len; i++) {
+				editorInsertChar(change.content[i]); // insert change at content positon i
+			}
+			E.curs_x = change.col; // reset cursor position
+			break;
+	}
+	pushChange(&redo_stack, change); // push the change to the redo stack
+}
+
+// Function for editor to redo recently made changes
+void editorRedo() {
+	Change change = popChange(&redo_stack); // get most recent change to be redone
+	if (change.type == 0) return; // break out if there are no changes to be redone
+
+	switch (change.type) {
+		case INSERT: // if most recent change was insertion
+			E.curs_y = change.row;
+			E.curs_x = change.col;
+			for (int i = 0; i < change.content_len; i++) {
+				editorInsertChar(change.content[i]); // insert change at content positon i
+			}
+			break;
+		case NEWLINE:
+			E.curs_y = change.row;
+			E.curs_x = change.col;
+			editorInsertNewline();
+			break;
+		case DELETE: // if most recent change was deletion
+			E.curs_y = change.row;
+			E.curs_x = change.col + change.content_len;
+			for (int i = 0; i < change.content_len; i++) {
+				editorDeleteChar(); // delete inserted character
+			}
+			break;
+	}
+	pushChange(&undo_stack, change); // push change to undo stack
+}
+
+// Function to calculate how many columns needed to display line numbering
 int editorLineNumberWidth() {
     int max_rows = E.num_rows > 0 ? E.num_rows : 1;
     int digits = 1;
@@ -1056,7 +1190,7 @@ void editorDrawRows(struct aBuf *ab) {
             while (padding--) aBufAppend(ab, " ", 1);
             aBufAppend(ab, welcome, welcome_len);
         } else {
-            aBufAppend(ab, "~", 1);
+            //aBufAppend(ab, "~", 1); // Append tilde for empty row.
         }
 
         aBufAppend(ab, "\x1b[K", 3);
@@ -1273,7 +1407,7 @@ void editorProcessKeypress() {
 			write(STDOUT_FILENO, "\x1b[2J", 4);
 			// Escape sequence, H -> cursor position (defaults to 1;1H).
 			write(STDOUT_FILENO, "\x1b[H", 3);
-			editorCleanup();
+			//editorCleanup();
 			exit(0);
 			break;
 
@@ -1300,6 +1434,14 @@ void editorProcessKeypress() {
 		// If combination is ctrl + v, then paste clipboard.
 		case CTRL_KEY('v'):
 			editorPasteClipboard();
+			break;
+
+		case CTRL_KEY('z'):
+			editorUndo();
+			break;
+
+		case CTRL_KEY('y'):
+			editorRedo();
 			break;
 
 		// If combination is ctrl + a, then select the entire text.
@@ -1419,6 +1561,7 @@ void initEditor() {
 	E.row_offset = 0;
 	E.col_offset = 0;
 	E.num_rows = 0;
+	E.cleanup_performed = 0;
 	E.dirty = 0; // Set dirty flag to zero -> no changes to save.
 	E.row = NULL;
 	E.file_name = NULL;
@@ -1427,7 +1570,11 @@ void initEditor() {
 	E.syntax = NULL;
 	E.clipboard = NULL;
 	E.clipboard_len = 0;
-	
+
+	// Initialize undo and redo stacks
+	initChangeStack(&undo_stack);
+	initChangeStack(&redo_stack);
+
 	// If invalid window size, end process
 	if (getWindowSize(&E.screen_rows, &E.screen_cols) == -1)
 		die("getWindowSize");
