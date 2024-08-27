@@ -63,7 +63,8 @@ enum editorHighlight {
 enum ChangeType {
 	INSERT,
 	DELETE,
-	NEWLINE
+	NEWLINE,
+	PASTE
 };
 
 /*** data ***/
@@ -123,8 +124,10 @@ struct editorConfig E;
 // Struct for storing changes in the file
 typedef struct {
 	enum ChangeType type; // the type of change made (e.g. deletion, insertion, newline, etc.)
-	int row; // Row where change occured
-	int col; // col where change occured
+    int start_row;
+    int start_col;
+    int end_row;
+    int end_col;
 	char *content; // pointer to hold content that was inserted/deleted
 	int content_len; // Length of the content
 } Change;
@@ -207,6 +210,11 @@ void disableRawMode() {
 	// Revert attribute to saved attribute orig_termios.
 	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1) 
 		die("tcsetattr");
+}
+
+// function to free the content of a Change
+void freeChange(Change *change) {
+    free(change->content);
 }
 
 // Function to set terminal into raw mode (inpts are read char by char without buffering / processing special chars)
@@ -343,55 +351,62 @@ int is_seperator(int c) {
 }
 
 void editorUpdateSyntax(eRow *row) {
-	row->hlight = realloc(row->hlight, row->r_size);
-	memset(row->hlight, HL_NORMAL, row->r_size);
-	if (E.syntax == NULL) return;
+    row->hlight = realloc(row->hlight, row->r_size);
+    memset(row->hlight, HL_NORMAL, row->r_size);
+    if (E.syntax == NULL) return;
 
-	char **keywords = E.syntax->keywords;
-	char *scs = E.syntax->singleline_comment_start;
-	char *mcs = E.syntax->multiline_comment_start;
-	char *mce = E.syntax->multiline_comment_end;
+    char **keywords = E.syntax->keywords;
+    char *scs = E.syntax->singleline_comment_start;
+    char *mcs = E.syntax->multiline_comment_start;
+    char *mce = E.syntax->multiline_comment_end;
 
-	int scs_len = scs ? strlen(scs) : 0;
-	int mcs_len = mcs ? strlen(mcs) : 0;
-	int mce_len = mce ? strlen(mce) : 0;
+    int scs_len = scs ? strlen(scs) : 0;
+    int mcs_len = mcs ? strlen(mcs) : 0;
+    int mce_len = mce ? strlen(mce) : 0;
 
-	int prev_sep = 1;
-	int in_string = 0;
-	int in_comment = (row->idx > 0 && E.row[row->idx - 1].hl_open_comment);
+    int prev_sep = 1;
+    int in_string = 0;
+    int in_comment = (row->idx > 0 && E.row[row->idx - 1].hl_open_comment);
 
-	int i = 0;
-	while (i < row->r_size) {
-		char c = row->render[i];
-		unsigned char prev_hlight = (i > 0) ? row->hlight[i - 1] : HL_NORMAL;
+    int i = 0;
+    while (i < row->r_size) {
+        char c = row->render[i];
+        unsigned char prev_hlight = (i > 0) ? row->hlight[i - 1] : HL_NORMAL;
 
-		if (scs_len && !in_string && !in_comment) {
-			if (!strncmp(&row->render[i], scs, scs_len)) {
-				memset(&row->hlight[i], HL_COMMENT, row->r_size - i);
-				break;
-			}
-		}
+        // Handle control characters
+        if (iscntrl(c)) {
+            row->hlight[i] = HL_NORMAL;
+            i++;
+            continue;
+        }
 
-		if (mcs_len && mce_len && !in_string) {
-			if (in_comment) {
-				row->hlight[i] = HL_MLCOMMENT;
-				if (!strncmp(&row->render[i], mce, mce_len)) {
-					memset(&row->hlight[i], HL_MLCOMMENT, mce_len);
-					i += mce_len;
-					in_comment = 0;
-					prev_sep = 1;
-					continue;
-				} else {
-					i++;
-					continue;
-				}
-			} else if (!strncmp(&row->render[i], mcs, mcs_len)) {
-				memset(&row->hlight[i], HL_MLCOMMENT, mcs_len);
-				i += mcs_len;
-				in_comment = 1;
-				continue;
-			}
-		}
+        if (scs_len && !in_string && !in_comment) {
+            if (!strncmp(&row->render[i], scs, scs_len)) {
+                memset(&row->hlight[i], HL_COMMENT, row->r_size - i);
+                break;
+            }
+        }
+
+        if (mcs_len && mce_len && !in_string) {
+            if (in_comment) {
+                row->hlight[i] = HL_MLCOMMENT;
+                if (!strncmp(&row->render[i], mce, mce_len)) {
+                    memset(&row->hlight[i], HL_MLCOMMENT, mce_len);
+                    i += mce_len;
+                    in_comment = 0;
+                    prev_sep = 1;
+                    continue;
+                } else {
+                    i++;
+                    continue;
+                }
+            } else if (!strncmp(&row->render[i], mcs, mcs_len)) {
+                memset(&row->hlight[i], HL_MLCOMMENT, mcs_len);
+                i += mcs_len;
+                in_comment = 1;
+                continue;
+            }
+        }
 
 		if (E.syntax->flags & HL_HIGHLIGHT_STRINGS) {
 			if (in_string) {
@@ -503,6 +518,7 @@ void initChangeStack(ChangeStack *stack) {
 
 void pushChange(ChangeStack *stack, Change change) {
 	if (stack->count > MAX_CHANGES) { // if max number of changes has been reached
+		freeChange(&stack->changes[0]);
 		// remove the oldest change
 		memmove(&stack->changes[0], &stack->changes[1], sizeof(Change) * (MAX_CHANGES - 1));
 		stack->count--;
@@ -516,7 +532,7 @@ Change popChange(ChangeStack *stack) {
 	if (stack->current >= 0) { // if there are changes available in the stack
 		return stack->changes[stack->current--]; // return change and decrement current
 	}
-	Change empty = {0, 0, 0, NULL, 0};
+	Change empty = {0};
 	return empty; // else return an empty change
 }
 
@@ -658,10 +674,19 @@ void editorRowDeleteChar(eRow *row, int at) {
 /*** editor operations ***/
 
 // Function to store/record changes made to file
-void editorRecordChange(enum ChangeType type, int row, int col, char *content, int content_len) {
-	Change change = {type, row, col, strdup(content), content_len}; // create change instance
-	pushChange(&undo_stack, change); // push change to the undo stack
-	initChangeStack(&redo_stack); // clear redo stack whenever change is made
+void editorRecordChange(enum ChangeType type, int start_row, int start_col, int end_row, int end_col, const char *content, int content_len) {
+    Change change;
+    change.type = type;
+    change.start_row = start_row;
+    change.start_col = start_col;
+    change.end_row = end_row;
+    change.end_col = end_col;
+    change.content = malloc(content_len + 1);
+    memcpy(change.content, content, content_len);
+    change.content[content_len] = '\0';
+    change.content_len = content_len;
+    pushChange(&undo_stack, change);
+    initChangeStack(&redo_stack);
 }
 
 // Function to delete a selection of text
@@ -703,14 +728,15 @@ void editorInsertChar(int c) {
     if (E.in_selection) {
         editorDeleteSelection();
     }
-	if (E.curs_y == E.num_rows) { // If on the last row.
-		editorInsertRow(E.num_rows, "", 0); // Insert new row.
-	}
-	// Place character at row pos y, and col pos x.
-	editorRowInsertChar(&E.row[E.curs_y], E.curs_x, c);
-	E.curs_x++;
-	char content[2] = {c, '\0'}; // init content with the char and null character
-	editorRecordChange(INSERT, E.curs_y, E.curs_x - 1, content, 1); // record content change
+    if (E.curs_y == E.num_rows) {
+        editorInsertRow(E.num_rows, "", 0);
+    }
+
+    editorRowInsertChar(&E.row[E.curs_y], E.curs_x, c);
+    E.curs_x++;
+
+    char content[2] = {c, '\0'};
+    editorRecordChange(INSERT, E.curs_y, E.curs_x - 1, E.curs_y, E.curs_x, content, 1);
 }
 
 // Function to insert a new line.
@@ -747,8 +773,7 @@ void editorDeleteChar() {
 		char deleted = row->chars[E.curs_x - 1]; // copy char to be deleted
 		editorRowDeleteChar(row, E.curs_x - 1); // Delete the char.
 		E.curs_x--; // Move cursor to the left.
-		char content[2] = {deleted, '\0'}; // init content with deleted char and null char
-		editorRecordChange(DELETE, E.curs_y, E.curs_x, content, 1);
+        editorRecordChange(DELETE, E.curs_y, E.curs_x, E.curs_y, E.curs_x + 1, &deleted, 1);
 	} else {
 		// Set cursor to end of previous line.
 		E.curs_x = E.row[E.curs_y - 1].size;
@@ -758,8 +783,8 @@ void editorDeleteChar() {
 		editorRowAppendString(&E.row[E.curs_y - 1], row->chars, row->size);
 		editorDeleteRow(E.curs_y); // Delete row y-cursor is on.
 		E.curs_y--;
-		editorRecordChange(DELETE, E.curs_y, E.curs_x, content, content_len);
-		free(content);
+        editorRecordChange(DELETE, E.curs_y, E.curs_x, E.curs_y + 1, 0, content, content_len);
+        free(content);
 	}
 }
 
@@ -814,70 +839,125 @@ void editorCopySelection() {
 void editorPasteClipboard() {
     if (E.clipboard == NULL || E.clipboard_len == 0) return;
 
-    if (E.in_selection) {
-        editorDeleteSelection();
+    int start_row = E.curs_y;
+    int start_col = E.curs_x;
+
+    int line_start = 0;
+    for (int i = 0; i <= E.clipboard_len; i++) {
+        if (i == E.clipboard_len || E.clipboard[i] == '\n') {
+            // Process the line
+            for (int j = line_start; j < i; j++) {
+                if (E.clipboard[j] == '\t') {
+                    int tab_size = TAB_STOP - (E.curs_x % TAB_STOP);
+                    for (int k = 0; k < tab_size; k++) {
+                        editorInsertChar(' ');
+                    }
+                } else if (!iscntrl(E.clipboard[j])) {
+                    editorInsertChar(E.clipboard[j]);
+                }
+            }
+
+            if (i < E.clipboard_len) {
+                editorInsertNewline();
+            }
+            line_start = i + 1;
+        }
     }
 
-    for (int i = 0; i < E.clipboard_len; i++) {
-        if (E.clipboard[i] == '\n') {
-            editorInsertNewline();
-        } else {
-            editorInsertChar(E.clipboard[i]);
-        }
+    editorRecordChange(PASTE, start_row, start_col, E.curs_y, E.curs_x, E.clipboard, E.clipboard_len);
+
+    // Update syntax highlighting for affected rows
+    for (int row = start_row; row <= E.curs_y; row++) {
+        editorUpdateSyntax(&E.row[row]);
     }
 }
 
 // Function for editor to undo recently made changes
 void editorUndo() {
-	Change change = popChange(&undo_stack); // get most recent change
-	if (change.type == 0) return; // if no changes, break out
+    Change change = popChange(&undo_stack);
+    if (change.type == 0) return;
 
-	switch (change.type) {
-		case INSERT: // if most recent change was insertion
-		case NEWLINE:
-			E.curs_y = change.row;
-			E.curs_x = change.col;
-			editorDeleteChar(); // delete inserted character
-			break;
-		case DELETE: // if most recent change was deletion
-			E.curs_y = change.row;
-			E.curs_x = change.col;
-			for (int i = 0; i < change.content_len; i++) {
-				editorInsertChar(change.content[i]); // insert change at content positon i
-			}
-			E.curs_x = change.col; // reset cursor position
-			break;
-	}
-	pushChange(&redo_stack, change); // push the change to the redo stack
+    switch (change.type) {
+        case INSERT:
+        case PASTE:
+            E.curs_y = change.end_row;
+            E.curs_x = change.end_col;
+            for (int i = 0; i < change.content_len; i++) {
+                editorDeleteChar();
+            }
+            E.curs_y = change.start_row;
+            E.curs_x = change.start_col;
+            break;
+        case DELETE:
+            E.curs_y = change.start_row;
+            E.curs_x = change.start_col;
+            for (int i = 0; i < change.content_len; i++) {
+                if (change.content[i] == '\n') {
+                    editorInsertNewline();
+                } else {
+                    editorInsertChar(change.content[i]);
+                }
+            }
+            break;
+        case NEWLINE:
+            E.curs_y = change.start_row;
+            E.curs_x = change.start_col;
+            editorDeleteChar();
+            break;
+    }
+
+    // Update syntax highlighting for the affected rows
+    for (int row = change.start_row; row <= change.end_row; row++) {
+        editorUpdateSyntax(&E.row[row]);
+    }
+
+    pushChange(&redo_stack, change);
 }
 
 // Function for editor to redo recently made changes
 void editorRedo() {
-	Change change = popChange(&redo_stack); // get most recent change to be redone
-	if (change.type == 0) return; // break out if there are no changes to be redone
+    Change change = popChange(&redo_stack);
+    if (change.type == 0) return;
 
-	switch (change.type) {
-		case INSERT: // if most recent change was insertion
-			E.curs_y = change.row;
-			E.curs_x = change.col;
-			for (int i = 0; i < change.content_len; i++) {
-				editorInsertChar(change.content[i]); // insert change at content positon i
-			}
-			break;
-		case NEWLINE:
-			E.curs_y = change.row;
-			E.curs_x = change.col;
-			editorInsertNewline();
-			break;
-		case DELETE: // if most recent change was deletion
-			E.curs_y = change.row;
-			E.curs_x = change.col + change.content_len;
-			for (int i = 0; i < change.content_len; i++) {
-				editorDeleteChar(); // delete inserted character
-			}
-			break;
-	}
-	pushChange(&undo_stack, change); // push change to undo stack
+    switch (change.type) {
+        case INSERT:
+            E.curs_y = change.start_row;
+            E.curs_x = change.start_col;
+            for (int i = 0; i < change.content_len; i++) {
+                editorInsertChar(change.content[i]);
+            }
+            break;
+        case DELETE:
+            E.curs_y = change.end_row;
+            E.curs_x = change.end_col;
+            for (int i = 0; i < change.content_len; i++) {
+                editorDeleteChar();
+            }
+            break;
+        case NEWLINE:
+            E.curs_y = change.start_row;
+            E.curs_x = change.start_col;
+            editorInsertNewline();
+            break;
+        case PASTE:
+            E.curs_y = change.start_row;
+            E.curs_x = change.start_col;
+            for (int i = 0; i < change.content_len; i++) {
+                if (change.content[i] == '\n') {
+                    editorInsertNewline();
+                } else {
+                    editorInsertChar(change.content[i]);
+                }
+            }
+            break;
+    }
+
+    // Update syntax highlighting for the affected rows
+    for (int row = change.start_row; row <= change.end_row; row++) {
+        editorUpdateSyntax(&E.row[row]);
+    }
+
+    pushChange(&undo_stack, change);
 }
 
 // Function to calculate how many columns needed to display line numbering
