@@ -152,6 +152,23 @@ char *C_HL_keywords[] = { // Define keywords for C
 	"int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
 	"void|", NULL
 };
+char *JAVA_HL_extensions[] = { ".java", NULL }; // Define extension for Java
+char *JAVA_HL_keywords[] = { // Define keywords for Java
+    "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
+    "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float",
+    "for", "if", "implements", "import", "instanceof", "int", "interface", "long", "native", "new",
+    "package", "private", "protected", "public", "return", "short", "static", "strictfp", "super", "switch",
+    "synchronized", "this", "throw", "throws", "transient", "try", "void", "volatile", "while",
+    "true|", "false|", "null|", NULL
+};
+
+char *PYTHON_HL_extensions[] = { ".py", NULL }; // Define extension for Python
+char *PYTHON_HL_keywords[] = { // Define keywords for Python
+    "and", "as", "assert", "break", "class", "continue", "def", "del", "elif", "else", "except",
+    "False", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "None",
+    "nonlocal", "not", "or", "pass", "raise", "return", "True", "try", "while", "with", "yield",
+    "self|", "print|", "len|", "range|", NULL
+};
 
 // Highlight Database.
 struct editorSyntax HLDB[] = {
@@ -162,6 +179,20 @@ struct editorSyntax HLDB[] = {
 		"//", "/*", "*/",
 		HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS
 	},
+	{
+        "java",
+        JAVA_HL_extensions,
+        JAVA_HL_keywords,
+        "//", "/*", "*/",
+        HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS
+    },
+    {
+        "python",
+        PYTHON_HL_extensions,
+        PYTHON_HL_keywords,
+        "#", "\"\"\"", "\"\"\"",
+        HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS
+    }
 };
 #define HLDB_ENTRIES (sizeof(HLDB) / sizeof(HLDB[0]))
 
